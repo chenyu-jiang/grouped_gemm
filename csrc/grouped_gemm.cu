@@ -1,5 +1,6 @@
 #include "grouped_gemm.h"
 
+#include <vector>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/util/BFloat16.h>
 #include <c10/cuda/CUDAStream.h>
@@ -214,22 +215,70 @@ void CublasGroupedGemm(torch::Tensor a,
 		       torch::Tensor c,
 		       torch::Tensor batch_sizes,
 		       bool trans_b) {
-  int64_t bs = batch_sizes.size(0), k = a.size(1);
+  int64_t bs = batch_sizes.size(0);
+  int64_t k = a.size(1);
   int64_t n = trans_b ? b.size(1) : b.size(2);
   int64_t b_rows = b.size(1), b_cols = b.size(2);
   c10::BFloat16* a_ptr = a.data_ptr<c10::BFloat16>();
   c10::BFloat16* b_ptr = b.data_ptr<c10::BFloat16>();
   c10::BFloat16* c_ptr = c.data_ptr<c10::BFloat16>();
-  for (int i = 0; i < bs; ++i) {
-    int64_t m = batch_sizes.data_ptr<int64_t>()[i];
-    CublasGemm(a_ptr, m, k, /*trans_a=*/false,
-	       b_ptr, b_rows, b_cols, trans_b,
-	       c_ptr, m, n);
-    a_ptr += m * k;
-    b_ptr += b_rows * b_cols;
-    c_ptr += m * n;
+
+  // don't support transa for now
+  std::vector<cublasOperation_t> transa_array(bs, CUBLAS_OP_N);
+  std::vector<cublasOperation_t> transb_array(bs, trans_b ? CUBLAS_OP_T : CUBLAS_OP_N);
+
+  // cublas uses col major storage, so instead of A * B, we do (B^T * A^T)
+  std::vector<int> m_array(bs, trans_b ? b_rows : b_cols);
+  std::vector<int> k_array(bs, trans_b ? b_cols : b_rows);
+  std::vector<int> n_array;
+  n_array.resize(bs);
+  for (int i=0; i<bs; i++) {
+    int64_t n = batch_sizes.data_ptr<int64_t>()[i];
+    n_array[i] = static_cast<int>(n);
   }
+
+  float alpha = 1.0, beta = 0.0;
+  std::vector<c10::BFloat16> alpha_array(bs, c10::BFloat16(alpha));
+  std::vector<c10::BFloat16> beta_array(bs, c10::BFloat16(beta));
+
+  std::vector<int> lda_array(bs, static_cast<int>(k));
+  std::vector<int> ldb_array(bs, trans_b ? static_cast<int>(b_rows) : static_cast<int>(b_cols));
+  std::vector<int> ldc_array(bs, static_cast<int>(n));
+  CUBLAS_CALL(cublasGemmGroupedBatchedEx(at::cuda::getCurrentCUDABlasHandle(),
+          transb_array, transa_array,
+          m_array, n_array, k_array,
+          alpha_array,
+          b.data_ptr<c10::BFloat16>(), CUDA_R_16BF, ldb_array,
+          a.data_ptr<c10::BFloat16>(), CUDA_R_16BF, lda_array,
+          beta_array,
+          c.data_ptr<c10::BFloat16>(), CUDA_R_16BF, ldc_array,
+          bs,
+          batch_sizes.data_ptr<int>(),
+          CUBLAS_COMPUTE_16F
+  ));
 }
+
+// void CublasGroupedGemm(torch::Tensor a,
+// 		       torch::Tensor b,
+// 		       torch::Tensor c,
+// 		       torch::Tensor batch_sizes,
+// 		       bool trans_b) {
+//   int64_t bs = batch_sizes.size(0), k = a.size(1);
+//   int64_t n = trans_b ? b.size(1) : b.size(2);
+//   int64_t b_rows = b.size(1), b_cols = b.size(2);
+//   c10::BFloat16* a_ptr = a.data_ptr<c10::BFloat16>();
+//   c10::BFloat16* b_ptr = b.data_ptr<c10::BFloat16>();
+//   c10::BFloat16* c_ptr = c.data_ptr<c10::BFloat16>();
+//   for (int i = 0; i < bs; ++i) {
+//     int64_t m = batch_sizes.data_ptr<int64_t>()[i];
+//     CublasGemm(a_ptr, m, k, /*trans_a=*/false,
+// 	       b_ptr, b_rows, b_cols, trans_b,
+// 	       c_ptr, m, n);
+//     a_ptr += m * k;
+//     b_ptr += b_rows * b_cols;
+//     c_ptr += m * n;
+//   }
+// }
 
 void CublasGroupedGemmVariableK(torch::Tensor a,
 				torch::Tensor b,
@@ -283,7 +332,7 @@ void GroupedGemmVariableK(torch::Tensor a,
 // assumed to be batched with fixed sized batches.
 //
 // TODO(tgale): Validate alignment is true for every batch element.
-void GroupedGemm(torch::Tensor a,
+void GroupedGemmCutlass(torch::Tensor a,
 		 torch::Tensor b,
 		 torch::Tensor c,
 		 torch::Tensor batch_sizes,
@@ -336,17 +385,69 @@ void GroupedGemm(torch::Tensor a,
 
   // NOTE: Use cuBLAS for SM90 until CUTLASS supports SM90-optimized grouped-gemm.
 #if !defined(GROUPED_GEMM_DEVICE_CAPABILITY) || GROUPED_GEMM_DEVICE_CAPABILITY != 80
-  CublasGroupedGemm(a, b, c, batch_sizes, trans_b);
-  return;
+  TORCH_CHECK(false, "Grouped CUTLASS GEMM not supported on this device");
 #else
-  // TODO(tgale): Support transposition with CUTLASS grouped GEMM.
   if (trans_b) {
-    CublasGroupedGemm(a, b, c, batch_sizes, trans_b);
-    return;
+    TORCH_CHECK(false, "Grouped CUTLASS GEMM with trans_b not supported on this device");
   }
   CutlassGroupedGemm(a, b, c, batch_sizes);
-  return;
 #endif
+  return;
+}
+
+void GroupedGemmCublas(torch::Tensor a,
+		 torch::Tensor b,
+		 torch::Tensor c,
+		 torch::Tensor batch_sizes,
+		 bool trans_a, bool trans_b) {
+  // NOTE: We only support 'trans_a' or 'trans_b', not both.
+  TORCH_CHECK(!(trans_a && trans_b));
+
+  // We expect the batch_sizes on CPU.
+  TORCH_CHECK(batch_sizes.is_cpu());
+  TORCH_CHECK(batch_sizes.ndimension() == 1);
+  TORCH_CHECK(batch_sizes.scalar_type() == torch::kInt64);
+
+  // We expected a CUDA tensor with two dimensions and shape
+  // (tokens, hidden_in) for 'a'.
+  TORCH_CHECK(a.is_cuda());
+  TORCH_CHECK(a.ndimension() == 2);
+  TORCH_CHECK(a.scalar_type() == torch::kBFloat16);
+
+  // Defer to the variable 'k' helper for the rest of the op.
+  if (trans_a) {
+    GroupedGemmVariableK(a, b, c, batch_sizes);
+    return;
+  }
+
+  // We expected a CUDA tensor with three dimensions and shape
+  // (num_experts, hidden_in, hidden_out) for 'b'.
+  TORCH_CHECK(b.is_cuda());
+  TORCH_CHECK(b.ndimension() == 3);
+  TORCH_CHECK(b.scalar_type() == torch::kBFloat16);
+
+  // Validate the contraction dimensions match.
+  int64_t tokens = a.size(0), num_experts = b.size(0);
+  int64_t hidden_in = trans_b ? b.size(2) : b.size(1);
+  int64_t hidden_out = trans_b ? b.size(1) : b.size(2);
+  TORCH_CHECK(hidden_in == a.size(1));
+
+  // Validate that we have one size per expert.
+  TORCH_CHECK(batch_sizes.size(0) == num_experts);
+
+  // Validate the output shape.
+  TORCH_CHECK(c.is_cuda());
+  TORCH_CHECK(c.ndimension() == 2);
+  TORCH_CHECK(c.scalar_type() == torch::kBFloat16);
+  TORCH_CHECK(c.size(0) == tokens);
+  TORCH_CHECK(c.size(1) == hidden_out);
+
+  // NOTE: We support transposition through the 'trans_b' flag.
+  TORCH_CHECK(a.is_contiguous());
+  TORCH_CHECK(b.is_contiguous());
+
+  CublasGroupedGemm(a, b, c, batch_sizes, trans_b);
+  return;
 }
 
 }  // namespace grouped_gemm

@@ -2,7 +2,13 @@
 
 namespace grouped_gemm {
 
-void GroupedGemm(torch::Tensor a,
+void GroupedGemmCutlass(torch::Tensor a,
+		 torch::Tensor b,
+		 torch::Tensor c,
+		 torch::Tensor batch_sizes,
+		 bool trans_a, bool trans_b);
+
+void GroupedGemmCublas(torch::Tensor a,
 		 torch::Tensor b,
 		 torch::Tensor c,
 		 torch::Tensor batch_sizes,

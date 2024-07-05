@@ -24,15 +24,22 @@ def add_transpose_flags(x):
             out.append(y + f)
     return out
 
+def add_backend_type_flags(x):
+    out = []
+    for y in x:
+        for f in ["cutlass", "cublas"]:
+            out.append(y + (f,))
+    return out
 
-_TEST_PROBLEMS = add_transpose_flags((
+
+_TEST_PROBLEMS = add_backend_type_flags(add_transpose_flags((
     (1, 128, 128, 128),
     (8, 128, 128, 128),
     (16, 128, 128, 128),
     (1, 128, 256, 512),
     (8, 128, 256, 512),
     (16, 128, 256, 512),
-))
+)))
 
 
 def randn(bs, x, y):
@@ -55,7 +62,7 @@ def gmm(a, b, batch_sizes, trans_b=False):
 @parameterized.parameters(*_TEST_PROBLEMS)
 class OpsTest(parameterized.TestCase):
 
-    def testGroupedGemm_FixedSizes(self, z, m, k, n, trans_b):
+    def testGroupedGemm_FixedSizes(self, z, m, k, n, trans_b, backend_type):
         torch.manual_seed(0)
         a = randn(z, m, k).view(-1, k)
         b = randn(z, n, k) if trans_b else randn(z, k, n)
@@ -66,7 +73,7 @@ class OpsTest(parameterized.TestCase):
         a_ref = a.detach().clone().requires_grad_(True)
         b_ref = b.detach().clone().requires_grad_(True)
 
-        out = ops.gmm(a, b, batch_sizes, trans_b)
+        out = ops.gmm(a, b, batch_sizes, trans_b, backend_type)
         expected_out = gmm(a_ref, b_ref, batch_sizes, trans_b)
         self.assertTrue(allclose(out, expected_out))
 
@@ -76,7 +83,7 @@ class OpsTest(parameterized.TestCase):
         self.assertTrue(allclose(a.grad, a_ref.grad))
         self.assertTrue(allclose(b.grad, b_ref.grad))
 
-    def testGroupedGemm_VariableSizes(self, z, m, k, n, trans_b):
+    def testGroupedGemm_VariableSizes(self, z, m, k, n, trans_b, backend_type):
         torch.manual_seed(0)
         a = randn(z, m, k).view(-1, k)
         b = randn(z, n, k) if trans_b else randn(z, k, n)
@@ -93,7 +100,7 @@ class OpsTest(parameterized.TestCase):
         a_ref = a.detach().clone().requires_grad_(True)
         b_ref = b.detach().clone().requires_grad_(True)
 
-        out = ops.gmm(a, b, batch_sizes, trans_b)
+        out = ops.gmm(a, b, batch_sizes, trans_b, backend_type)
         expected_out = gmm(a_ref, b_ref, batch_sizes, trans_b)
         self.assertTrue(allclose(out, expected_out))
 

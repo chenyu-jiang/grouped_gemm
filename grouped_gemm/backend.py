@@ -21,9 +21,13 @@ def _allocate_output(a, b, batch_sizes, trans_a, trans_b):
     )
     return torch.empty(*shape, device=a.device, dtype=a.dtype)
 
-def gmm(a, b, batch_sizes, trans_a=False, trans_b=False, c=None):
+def gmm(a, b, batch_sizes, trans_a=False, trans_b=False, c=None, backend_type="cutlass"):
     if c is None:
         c = _allocate_output(a, b, batch_sizes, trans_a, trans_b)
-    backend.gmm(a, b, c, batch_sizes, trans_a, trans_b)
+    if backend_type == "cutlass":
+        backend_f = backend.gmm_cutlass
+    elif backend_type == "cublas":
+        backend_f = backend.gmm_cublas
+    backend_f(a, b, c, batch_sizes, trans_a, trans_b)
     return c
 
