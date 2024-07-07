@@ -21,10 +21,11 @@ namespace grouped_gemm {
     TORCH_CHECK(status == cudaSuccess, err);		    \
   } while (0)
 
+
 #define CUBLAS_CALL(code)					  \
   do {								  \
     cublasStatus_t status = code;				  \
-    TORCH_CHECK(status == CUBLAS_STATUS_SUCCESS, "CuBLAS Error"); \
+    TORCH_CHECK(status == CUBLAS_STATUS_SUCCESS, cublasGetStatusName(status)); \
   } while (0)
 
 #define GROUPED_GEMM_STRINGIFY_HELPER(x) #x
@@ -210,52 +211,76 @@ void CublasGemm(c10::BFloat16 *a, int64_t a_rows, int64_t a_cols, bool trans_a,
 			   CUBLAS_GEMM_DEFAULT));
 }
 
-void CublasGroupedGemm(torch::Tensor a,
-		       torch::Tensor b,
-		       torch::Tensor c,
+void CublasGroupedGemm(
+           int64_t b_rows,
+           int64_t b_cols,
+           torch::Tensor a_ptrs,
+		       torch::Tensor b_ptrs,
+		       torch::Tensor c_ptrs,
 		       torch::Tensor batch_sizes,
 		       bool trans_b) {
   int64_t bs = batch_sizes.size(0);
-  int64_t k = a.size(1);
-  int64_t n = trans_b ? b.size(1) : b.size(2);
-  int64_t b_rows = b.size(1), b_cols = b.size(2);
-  c10::BFloat16* a_ptr = a.data_ptr<c10::BFloat16>();
-  c10::BFloat16* b_ptr = b.data_ptr<c10::BFloat16>();
-  c10::BFloat16* c_ptr = c.data_ptr<c10::BFloat16>();
-
+  int64_t k = trans_b ? b_cols : b_rows;
+  int64_t n = trans_b ? b_rows : b_cols;
+  
   // don't support transa for now
   std::vector<cublasOperation_t> transa_array(bs, CUBLAS_OP_N);
   std::vector<cublasOperation_t> transb_array(bs, trans_b ? CUBLAS_OP_T : CUBLAS_OP_N);
 
   // cublas uses col major storage, so instead of A * B, we do (B^T * A^T)
-  std::vector<int> m_array(bs, trans_b ? b_rows : b_cols);
-  std::vector<int> k_array(bs, trans_b ? b_cols : b_rows);
-  std::vector<int> n_array;
-  n_array.resize(bs);
+  std::vector<int> n_array(bs, n);
+  std::vector<int> k_array(bs, k);
+  std::vector<int> m_array;
+  m_array.resize(bs);
   for (int i=0; i<bs; i++) {
     int64_t n = batch_sizes.data_ptr<int64_t>()[i];
-    n_array[i] = static_cast<int>(n);
+    m_array[i] = static_cast<int>(n);
   }
 
   float alpha = 1.0, beta = 0.0;
-  std::vector<c10::BFloat16> alpha_array(bs, c10::BFloat16(alpha));
-  std::vector<c10::BFloat16> beta_array(bs, c10::BFloat16(beta));
+  std::vector<float> alpha_array(bs, alpha);
+  std::vector<float> beta_array(bs, beta);
 
   std::vector<int> lda_array(bs, static_cast<int>(k));
-  std::vector<int> ldb_array(bs, trans_b ? static_cast<int>(b_rows) : static_cast<int>(b_cols));
+  std::vector<int> ldb_array(bs, static_cast<int>(n));
   std::vector<int> ldc_array(bs, static_cast<int>(n));
+
+  std::vector<int> group_sizes(bs, 1);
+  
   CUBLAS_CALL(cublasGemmGroupedBatchedEx(at::cuda::getCurrentCUDABlasHandle(),
-          transb_array, transa_array,
-          m_array, n_array, k_array,
-          alpha_array,
-          b.data_ptr<c10::BFloat16>(), CUDA_R_16BF, ldb_array,
-          a.data_ptr<c10::BFloat16>(), CUDA_R_16BF, lda_array,
-          beta_array,
-          c.data_ptr<c10::BFloat16>(), CUDA_R_16BF, ldc_array,
-          bs,
-          batch_sizes.data_ptr<int>(),
-          CUBLAS_COMPUTE_16F
+          transb_array.data(), transa_array.data(),
+          n_array.data(), m_array.data(), k_array.data(),
+          alpha_array.data(),
+          reinterpret_cast<void* const*>(b_ptrs.data_ptr<uint64_t>()), CUDA_R_16BF, ldb_array.data(),
+          reinterpret_cast<void* const*>(a_ptrs.data_ptr<uint64_t>()), CUDA_R_16BF, lda_array.data(),
+          beta_array.data(),
+          reinterpret_cast<void* const*>(c_ptrs.data_ptr<uint64_t>()), CUDA_R_16BF, ldc_array.data(),
+          static_cast<int>(bs),
+          group_sizes.data(),
+          CUBLAS_COMPUTE_32F
   ));
+}
+
+void CublasGroupedGemmGetPtrs(
+           torch::Tensor a,
+           torch::Tensor b,
+           torch::Tensor c,
+           torch::Tensor batch_sizes,
+           bool trans_b,
+           torch::Tensor a_ptrs,
+		       torch::Tensor b_ptrs,
+		       torch::Tensor c_ptrs) {
+  int64_t bs = batch_sizes.size(0);
+  int64_t k = a.size(1);
+  int64_t n = trans_b ? b.size(1) : b.size(2);
+  int64_t b_rows = b.size(1), b_cols = b.size(2);
+  int64_t curr_m = 0;
+  for (int i = 0; i < bs; ++i) {
+    a_ptrs.data_ptr<uint64_t>()[i] = reinterpret_cast<uint64_t>(a.data_ptr<c10::BFloat16>() + curr_m * k);
+    b_ptrs.data_ptr<uint64_t>()[i] = reinterpret_cast<uint64_t>(b.data_ptr<c10::BFloat16>() + i * b_rows * b_cols);
+    c_ptrs.data_ptr<uint64_t>()[i] = reinterpret_cast<uint64_t>(c.data_ptr<c10::BFloat16>() + curr_m * n);
+    curr_m += batch_sizes.data_ptr<int64_t>()[i];
+  }
 }
 
 // void CublasGroupedGemm(torch::Tensor a,
@@ -399,6 +424,9 @@ void GroupedGemmCublas(torch::Tensor a,
 		 torch::Tensor b,
 		 torch::Tensor c,
 		 torch::Tensor batch_sizes,
+     torch::Tensor a_ptrs,
+     torch::Tensor b_ptrs,
+     torch::Tensor c_ptrs,
 		 bool trans_a, bool trans_b) {
   // NOTE: We only support 'trans_a' or 'trans_b', not both.
   TORCH_CHECK(!(trans_a && trans_b));
@@ -446,7 +474,11 @@ void GroupedGemmCublas(torch::Tensor a,
   TORCH_CHECK(a.is_contiguous());
   TORCH_CHECK(b.is_contiguous());
 
-  CublasGroupedGemm(a, b, c, batch_sizes, trans_b);
+  TORCH_CHECK(a_ptrs.is_cuda(), "a_ptrs must be on CUDA");
+  TORCH_CHECK(b_ptrs.is_cuda(), "b_ptrs must be on CUDA");
+  TORCH_CHECK(c_ptrs.is_cuda(), "c_ptrs must be on CUDA");
+
+  CublasGroupedGemm(b.size(1), b.size(2), a_ptrs, b_ptrs, c_ptrs, batch_sizes, trans_b);
   return;
 }
 

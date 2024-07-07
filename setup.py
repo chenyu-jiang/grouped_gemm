@@ -15,6 +15,7 @@ cwd = Path(os.path.dirname(os.path.abspath(__file__)))
 
 nvcc_flags = [
     "-std=c++17",  # NOTE: CUTLASS requires c++17
+    "-lcublas"
 ]
 
 if device_capability:
@@ -36,7 +37,8 @@ ext_modules = [
                 "-fopenmp", "-fPIC", "-Wno-strict-aliasing"
             ],
             "nvcc": nvcc_flags,
-        }
+        },
+        extra_link_args=["-lcublas"],
     )
 ]
 
