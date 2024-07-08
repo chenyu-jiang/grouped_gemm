@@ -233,8 +233,8 @@ void CublasGroupedGemm(
   std::vector<int> m_array;
   m_array.resize(bs);
   for (int i=0; i<bs; i++) {
-    int64_t n = batch_sizes.data_ptr<int64_t>()[i];
-    m_array[i] = static_cast<int>(n);
+    int64_t m = batch_sizes.data_ptr<int64_t>()[i];
+    m_array[i] = static_cast<int>(m);
   }
 
   float alpha = 1.0, beta = 0.0;
@@ -242,7 +242,7 @@ void CublasGroupedGemm(
   std::vector<float> beta_array(bs, beta);
 
   std::vector<int> lda_array(bs, static_cast<int>(k));
-  std::vector<int> ldb_array(bs, static_cast<int>(n));
+  std::vector<int> ldb_array(bs, static_cast<int>(b_cols));
   std::vector<int> ldc_array(bs, static_cast<int>(n));
 
   std::vector<int> group_sizes(bs, 1);

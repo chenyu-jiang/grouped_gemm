@@ -28,7 +28,7 @@ class GroupedGemm(torch.autograd.Function):
             lhs, rhs = (grad, a) if trans_b else (a, grad)
             bgrad = backend.gmm(
                 lhs, rhs, batch_sizes, trans_a=True, trans_b=False, backend_type=backend_type)
-        return agrad, bgrad, None, None
+        return agrad, bgrad, None, None, None
 
 
 def gmm(a, b, batch_sizes, trans_b=False, backend_type="cutlass"):

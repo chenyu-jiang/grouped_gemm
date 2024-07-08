@@ -1,11 +1,9 @@
 import unittest
-import itertools
 
 from absl.testing import parameterized
 
 from grouped_gemm import ops
 import torch
-import numpy as np
 
 
 def allclose(x, y, pct=2.0):
@@ -64,7 +62,7 @@ def gmm(a, b, batch_sizes, trans_b=False):
 class OpsTest(parameterized.TestCase):
 
     def testGroupedGemm_FixedSizes(self, z, m, k, n, trans_b, backend_type, check_gradient):
-        if (backend_type == "cutlass" and trans_b) or check_gradient:
+        if backend_type == "cutlass" and (trans_b or check_gradient):
             return
         torch.manual_seed(0)
         a = randn(z, m, k).view(-1, k)
@@ -88,7 +86,7 @@ class OpsTest(parameterized.TestCase):
             self.assertTrue(allclose(b.grad, b_ref.grad))
 
     def testGroupedGemm_VariableSizes(self, z, m, k, n, trans_b, backend_type, check_gradient):
-        if (backend_type == "cutlass" and trans_b) or check_gradient:
+        if backend_type == "cutlass" and (trans_b or check_gradient):
             return
         torch.manual_seed(0)
         a = randn(z, m, k).view(-1, k)
@@ -118,28 +116,6 @@ class OpsTest(parameterized.TestCase):
             self.assertTrue(allclose(b.grad, b_ref.grad))
 
 
-def testGroupedGemm_VariableSizes(z, m, k, n, trans_b, backend_type):
-    torch.manual_seed(0)
-    a = randn(z, m, k).view(-1, k)
-    b = randn(z, n, k) if trans_b else randn(z, k, n)
-
-    dist = torch.rand(z, )
-    dist /= dist.sum()
-    batch_sizes = (dist * m).to(torch.long)
-    error = m * z - batch_sizes.sum()
-    batch_sizes[-1] += error
-    print("batch_sizes:", batch_sizes)
-    assert batch_sizes.sum() == (m * z)
-
-    a.requires_grad_(False)
-    b.requires_grad_(False)
-    a_ref = a.detach().clone().requires_grad_(False)
-    b_ref = b.detach().clone().requires_grad_(False)
-
-    out = ops.gmm(a, b, batch_sizes, trans_b, backend_type)
-    expected_out = gmm(a_ref, b_ref, batch_sizes, trans_b)
-    assert (allclose(out, expected_out))
 
 if __name__ == '__main__':
     unittest.main()
-    # testGroupedGemm_VariableSizes(8, 128, 256, 512, False, "cublas")
